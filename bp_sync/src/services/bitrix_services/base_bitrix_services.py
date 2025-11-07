@@ -4,7 +4,7 @@ from fastapi import status
 
 from core.logger import logger
 from core.settings import settings
-from schemas.base_schemas import (  # CoreCreateSchema,; CoreUpdateSchema,
+from schemas.base_schemas import (
     CommonFieldMixin,
     ListResponseSchema,
 )
@@ -30,18 +30,26 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
     def _get_method(
         self,
         action: str,
-        entity_type_id: int | None,
+        entity_type_id: int | None = None,
         crm: bool = True,
     ) -> str:
-        """Возвращает имя метода API в зависимости от типа сущности"""
-        beginning_request = ""
-        if crm:
-            beginning_request = "crm."
-        return (
-            f"{beginning_request}item.{action}"
-            if entity_type_id
-            else f"{beginning_request}{self.entity_name}.{action}"
-        )
+        """
+        Формирует имя метода API.
+
+        Args:
+            action: Действие (add, get, update, delete, list)
+            entity_type_id: ID типа сущности для универсальных методов
+            crm: Является ли сущность CRM-сущностью
+
+        Returns:
+            Имя метода API
+        """
+        prefix = "crm." if crm else ""
+
+        if entity_type_id:
+            return f"{prefix}item.{action}"
+        else:
+            return f"{prefix}{self.entity_name}.{action}"
 
     def _prepare_params(
         self,
@@ -50,7 +58,18 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         entity_type_id: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Подготавливает параметры для API-запроса"""
+        """
+        Подготавливает параметры для API-запроса.
+
+        Args:
+            entity_id: ID сущности
+            data: Данные для создания/обновления
+            entity_type_id: ID типа сущности
+            **kwargs: Дополнительные параметры
+
+        Returns:
+            Параметры запроса
+        """
         # params = kwargs.copy()
         params = {k: v for k, v in kwargs.items() if v is not None}
         if entity_id is not None:
@@ -72,7 +91,22 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         entity_type_id: int | None = None,
         crm: bool = True,
     ) -> Any:
-        """Обрабатывает ответ API и извлекает данные"""
+        """
+        Обрабатывает ответ API.
+
+        Args:
+            response: Ответ API
+            action: Выполненное действие
+            entity_id: ID сущности
+            entity_type_id: ID типа сущности
+            crm: Тип сущности
+
+        Returns:
+            Результат обработки
+
+        Raises:
+            BitrixApiError: При ошибках API
+        """
         result = response.get("result")
 
         # Для универсальных методов (crm.item.*) данные находятся внутри 'item'
@@ -89,7 +123,14 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
             )
             entity_ref = f"ID={entity_id}" if entity_id else ""
             logger.error(
-                f"Failed to {action} {self.entity_name} {entity_ref}: {error}"
+                f"Failed to {action} {self.entity_name} {entity_ref}: {error}",
+                extra={
+                    "action": action,
+                    "entity": self.entity_name,
+                    "entity_id": entity_id,
+                    "error": error,
+                    "error_description": error_description,
+                },
             )
 
             if action == "get":
@@ -104,6 +145,7 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
 
             raise BitrixApiError(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=f"{action}_{self.entity_name}_failed",
                 error_description=f"Failed to {action} {self.entity_name}",
             )
 
@@ -118,7 +160,10 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
     ) -> int | None:
         """Создание новой сущности"""
         entity_title = getattr(data, "title", "")
-        logger.info(f"Creating new {self.entity_name}: {entity_title}")
+        logger.info(
+            f"Creating new {self.entity_name}: {entity_title}",
+            extra={"entity_type_id": entity_type_id, "crm": crm},
+        )
         method = self._get_method("add", entity_type_id, crm)
         params = self._prepare_params(data=data, entity_type_id=entity_type_id)
 
@@ -128,8 +173,11 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         result = self._handle_response(response, "add")
         created_id = result["id"] if entity_type_id else result
         logger.info(
-            f"{self.entity_name.capitalize()} created successfully: "
-            f"ID={created_id}"
+            (
+                f"{self.entity_name.capitalize()} created successfully: "
+                f"ID={created_id}"
+            ),
+            extra={"entity_id": created_id},
         )
         return created_id  # type: ignore[no-any-return]
 
@@ -141,7 +189,10 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         crm: bool = True,
     ) -> SchemaTypeCreate:
         """Получение сущности по ID"""
-        logger.debug(f"Fetching {self.entity_name} ID={entity_id}")
+        logger.debug(
+            f"Fetching {self.entity_name} ID={entity_id}",
+            extra={"entity_id": entity_id, "entity_type_id": entity_type_id},
+        )
 
         method = self._get_method("get", entity_type_id, crm)
         params = self._prepare_params(
@@ -175,7 +226,10 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
             )
 
         entity_id = data.external_id
-        logger.info(f"Updating {self.entity_name} ID={entity_id}")
+        logger.info(
+            f"Updating {self.entity_name} ID={entity_id}",
+            extra={"entity_id": entity_id, "entity_type_id": entity_type_id},
+        )
 
         method = self._get_method("update", entity_type_id, crm)
         params = self._prepare_params(
@@ -185,21 +239,24 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
             method=method, params=params
         )
         # Для универсальных методов возвращается объект, для обычных - булево
-        success = bool(
-            response.get("result", {}).get("item")
-            if entity_type_id
-            else response.get("result")
-        )
+        if entity_type_id:
+            success = bool(response.get("result", {}).get("item"))
+        else:
+            success = response.get("result") is True
 
         if success:
             logger.info(
-                f"{self.entity_name.capitalize()} updated successfully: "
-                f"ID={entity_id}"
+                (
+                    f"{self.entity_name.capitalize()} updated successfully: "
+                    f"ID={entity_id}"
+                ),
+                extra={"entity_id": entity_id},
             )
         else:
-            error = response.get("error", "Unknown error")
+            error = response.get("error", "unknown_error")
             logger.error(
-                f"Failed to update {self.entity_name} ID={entity_id}: {error}"
+                f"Failed to update {self.entity_name} ID={entity_id}: {error}",
+                extra={"entity_id": entity_id, "error": error},
             )
 
         return success
@@ -212,7 +269,10 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         crm: bool = True,
     ) -> bool:
         """Удаление сущности по ID"""
-        logger.info(f"Deleting {self.entity_name} ID={entity_id}")
+        logger.info(
+            f"Deleting {self.entity_name} ID={entity_id}",
+            extra={"entity_id": entity_id, "entity_type_id": entity_type_id},
+        )
 
         method = self._get_method("delete", entity_type_id, crm)
         params = self._prepare_params(
@@ -232,15 +292,18 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
 
         if success:
             logger.info(
-                f"{self.entity_name.capitalize()} deleted successfully: "
-                f"ID={entity_id}"
+                (
+                    f"{self.entity_name.capitalize()} deleted successfully: "
+                    f"ID={entity_id}"
+                ),
+                extra={"entity_id": entity_id},
             )
         else:
-            error = response.get("error", "Unknown error")
+            error = response.get("error", "unknown_error")
             logger.error(
-                f"Failed to delete {self.entity_name} ID={entity_id}: {error}"
+                f"Failed to delete {self.entity_name} ID={entity_id}: {error}",
+                extra={"entity_id": entity_id, "error": error},
             )
-
         return success
 
     @handle_bitrix_errors()
@@ -339,9 +402,13 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
             ```
         """
         logger.debug(
-            f"Fetching {self.entity_name} list: "
-            f"select={select}, filter={filter_entity}, "
-            f"order={order}, start={start}"
+            f"Fetching {self.entity_name} list",
+            extra={
+                "select_fields": len(select) if select else 0,
+                "filter_count": len(filter_entity) if filter_entity else 0,
+                "start": start,
+                "entity_type_id": entity_type_id,
+            },
         )
 
         method = self._get_method("list", entity_type_id, crm)
@@ -367,8 +434,14 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         next_page = response.get("next")
         parsed_entities = [self.update_schema(**entity) for entity in entities]
         logger.info(
-            f"Fetched {len(parsed_entities)} of {total} {self.entity_name}s"
+            f"Fetched {len(parsed_entities)} of {total} {self.entity_name}s",
+            extra={
+                "fetched_count": len(parsed_entities),
+                "total_count": total,
+                "has_next_page": next_page is not None,
+            },
         )
+
         return ListResponseSchema(
             result=parsed_entities,
             total=total,
@@ -383,28 +456,37 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         self, user_id: int, message: str, chat: bool = False
     ) -> bool:
         """Отправка сообщения пользователю в Битрикс24"""
-        logger.debug(f"Sending message to {user_id}. Message: {message}")
-        params: dict[str, Any] = {}
-        if chat:
-            params = {
-                "CHAT_ID": user_id,
-                "message": message,
-            }
-        else:
-            params = {
+        logger.debug(
+            f"Sending message to {user_id}",
+            extra={
                 "user_id": user_id,
-                "message": message,
-            }
+                "is_chat": chat,
+                "message_length": len(message),
+            },
+        )
+        params: dict[str, Any] = {
+            "CHAT_ID" if chat else "user_id": user_id,
+            "message": message,
+        }
         try:
             response = await self.bitrix_client.call_api(
                 "im.message.add",
                 params=params,
             )
-            return bool(response.get("result", False))
-        except Exception:
+            success = bool(response.get("result", False))
+
+            if success:
+                logger.debug("Message sent successfully")
+            else:
+                logger.warning("Failed to send message")
+
+            return success
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
             return False
 
     def get_link(self, external_id: int | str | None) -> str:
+        """Генерирует ссылку на сущность в Bitrix24."""
         return (
             f"{settings.BITRIX_PORTAL}/crm/{self.entity_name}/details/"
             f"{external_id if external_id else ''}/"
@@ -413,13 +495,28 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
     def get_formatted_link(
         self, external_id: int | str | None, titlt: str
     ) -> str:
+        """Генерирует форматированную ссылку для Bitrix24."""
         return f"[url={self.get_link(external_id)}]{titlt}[/url]"
 
     @handle_bitrix_errors()
     async def execute_batch(
         self, commands: dict[str, Any], halt: int = 0
     ) -> Any:
-        """Выполняет батч-запрос с обработкой ошибок"""
+        """
+        Выполняет батч-запрос.
+
+        Args:
+            commands: Команды для выполнения
+            halt: Останавливать ли выполнение при ошибке
+
+        Returns:
+            Результаты выполнения команд
+        """
+        logger.debug(
+            "Executing batch request",
+            extra={"command_count": len(commands), "halt": halt},
+        )
+
         method = "batch"
         params: dict[str, Any] = {"halt": halt, "cmd": commands}
         response = await self.bitrix_client.call_api(
@@ -427,3 +524,8 @@ class BaseBitrixEntityClient(Generic[SchemaTypeCreate, SchemaTypeUpdate]):
         )
 
         return self._handle_response(response, method)
+
+    @property
+    def entity_type(self) -> str:
+        """Возвращает тип сущности."""
+        return self.entity_name

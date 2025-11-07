@@ -1,11 +1,9 @@
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-import redis.asyncio as aredis
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
-from redis.asyncio import Redis
 from sqladmin import Admin
 
 from admin.admin_models import register_models
@@ -13,8 +11,8 @@ from admin.authenticate import BasicAuthBackend
 from api.v1.test import test_router
 from core.logger import LOGGING, logger
 from core.settings import settings
-from db import redis
 from db.postgres import engine
+from db.redis import close_redis, init_redis
 from services.rabbitmq_client import get_rabbitmq
 
 # from cryptography.fernet import Fernet
@@ -23,32 +21,6 @@ from services.rabbitmq_client import get_rabbitmq
 # Преобразовать в строку для хранения
 # key_str = new_key.decode('utf-8')
 # print("Сгенерированный ключ:", key_str)
-
-
-async def _init_redis() -> None:
-    redis.redis = Redis(
-        host=settings.REDIS_HOST,
-        port=settings.REDIS_PORT,
-        db=0,
-        password=settings.REDIS_PASSWORD,
-        decode_responses=True,
-        ssl=False,
-    )
-    try:
-        await redis.redis.ping()
-        logger.info("Успешное подключение к Redis.")
-    except aredis.AuthenticationError:
-        logger.error("Ошибка аутентификации: неверный пароль Redis")
-        raise
-    except aredis.ConnectionError:
-        logger.error("Не удалось подключиться к Redis")
-        raise
-
-
-async def _shutdown_redis() -> None:
-    if redis.redis:
-        await redis.redis.save()
-        await redis.redis.aclose()
 
 
 async def _init_rabbitmq() -> None:
@@ -63,11 +35,45 @@ async def _shutdown_rabbitmq() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    await _init_redis()
+    await init_redis()
     await _init_rabbitmq()
     yield
-    await _shutdown_redis()
+    await close_redis()
     await _shutdown_rabbitmq()
+
+
+def setup_routes(app: FastAPI) -> None:
+    """Настройка маршрутов приложения."""
+    app.include_router(test_router, prefix="/api/v1/test", tags=["test"])
+
+
+def setup_admin_panel(app: FastAPI) -> None:
+    """Настройка админ-панели."""
+    auth_backend = BasicAuthBackend()
+    admin = Admin(
+        app,
+        engine,
+        title="Админка",
+        templates_dir="templates/admin",
+        authentication_backend=auth_backend,
+    )
+    register_models(admin)
+
+
+def create_app() -> FastAPI:
+    """Фабрика для создания приложения."""
+    app = FastAPI(
+        title=settings.PROJECT_NAME,
+        docs_url="/api/openapi",
+        openapi_url="/api/openapi.json",
+        default_response_class=ORJSONResponse,
+        lifespan=lifespan,
+    )
+
+    setup_routes(app)
+    setup_admin_panel(app)
+
+    return app
 
 
 def start_server() -> None:
@@ -82,25 +88,7 @@ def start_server() -> None:
     )
 
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    docs_url="/api/openapi",
-    openapi_url="/api/openapi.json",
-    default_response_class=ORJSONResponse,
-    lifespan=lifespan,
-)
-
-app.include_router(test_router, prefix="/api/v1/test", tags=["test"])
-
-auth_backend = BasicAuthBackend()
-admin = Admin(
-    app,
-    engine,
-    title="Админка",
-    templates_dir="templates/admin",
-    authentication_backend=auth_backend,
-)
-register_models(admin)
+app = create_app()
 
 
 if __name__ == "__main__":

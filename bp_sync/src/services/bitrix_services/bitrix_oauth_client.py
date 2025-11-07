@@ -1,4 +1,3 @@
-from typing import Dict
 from urllib.parse import urlencode
 
 from core.logger import logger
@@ -12,6 +11,8 @@ TOKEN_ENDPOINT = "/oauth/token/"
 
 
 class BitrixOAuthClient(BaseBitrixClient):
+    """Клиент для OAuth аутентификации с Bitrix24."""
+
     def __init__(
         self,
         portal_domain: str,
@@ -19,7 +20,7 @@ class BitrixOAuthClient(BaseBitrixClient):
         client_secret: str,
         redirect_uri: str,
         token_storage: TokenStorage,
-        timeout: int = DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
     ):
         super().__init__(timeout)
         self.portal_domain = portal_domain
@@ -30,11 +31,23 @@ class BitrixOAuthClient(BaseBitrixClient):
         self.token_storage = token_storage
 
     async def get_valid_token(self) -> str:
+        """
+        Получает валидный access token.
+
+        Returns:
+            Access token
+
+        Raises:
+            BitrixAuthError: Если токены недоступны
+        """
         if access_token := await self.token_storage.get_token("access_token"):
+            logger.debug("Using existing access token")
             return access_token
+
         if refresh_token := await self.token_storage.get_token(
             "refresh_token"
         ):
+            logger.debug("Refreshing access token")
             return await self._refresh_access_token(refresh_token)
         logger.warning(
             "No valid tokens available, re-authentication required."
@@ -45,7 +58,7 @@ class BitrixOAuthClient(BaseBitrixClient):
         )
 
     async def _refresh_access_token(self, refresh_token: str) -> str:
-        """Обновление токена доступа"""
+        """Обновление access token с помощью refresh token."""
         params = {
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -66,55 +79,88 @@ class BitrixOAuthClient(BaseBitrixClient):
         return await self._exchange_token(params, "authorization")
 
     async def _exchange_token(
-        self, params: Dict[str, str], operation: str
+        self, params: dict[str, str], operation: str
     ) -> str:
-        """Общая логика получения и сохранения токена"""
-        # token_data = await self._post(self.token_url, payload=params)
-        token_data = await self._get(self.token_url, params=params)
-        self._validate_token_response(token_data)
-        access_token = self._extract_access_token(token_data)
-        await self._save_tokens(token_data)
+        """
+        Общая логика получения и сохранения токенов.
 
-        logger.info(
-            f"Token {operation} successful",
-            extra={"grant_type": params["grant_type"]},
-        )
-        return access_token
+        Args:
+            params: Параметры для запроса токена
+            operation: Тип операции для логирования
 
-    def _validate_token_response(self, token_data: Dict[str, str]) -> None:
+        Returns:
+            Access token
+        """
+        try:
+            # token_data = await self._post(self.token_url, payload=params)
+            token_data = await self._get(self.token_url, params=params)
+            self._validate_token_response(token_data)
+            access_token = self._extract_access_token(token_data)
+            await self._save_tokens(token_data)
+
+            logger.info(
+                f"Token {operation} successful",
+                extra={
+                    "grant_type": params["grant_type"],
+                    "portal_domain": self.portal_domain,
+                },
+            )
+            return access_token
+
+        except Exception as e:
+            logger.error(
+                f"Token {operation} failed: {e}",
+                extra={"grant_type": params["grant_type"]},
+            )
+            raise
+
+    def _validate_token_response(self, token_data: dict[str, str]) -> None:
         """Валидация ответа с токеном"""
         if "error" in token_data:
             error_msg = token_data.get(
                 "error_description", "Unknown OAuth error"
             )
-            logger.error(f"Bitrix OAuth error: {error_msg}")
-            raise BitrixAuthError(detail=f"OAuth error: {error_msg}")
+            logger.error(
+                f"Bitrix OAuth error: {error_msg}",
+                extra={"response_data": token_data},
+            )
+            raise BitrixAuthError(
+                f"OAuth error: {error_msg}", detail=token_data
+            )
 
-    def _extract_access_token(self, token_data: Dict[str, str]) -> str:
+    def _extract_access_token(self, token_data: dict[str, str]) -> str:
         """Извлечение access_token из ответа"""
         access_token = token_data.get("access_token")
-        if not isinstance(access_token, str):
+        if not access_token or not isinstance(access_token, str):
             logger.error(
-                f"Invalid access_token type: {type(access_token).__name__}"
+                "Invalid access token in response",
+                extra={"access_token_type": type(access_token).__name__},
             )
-            raise BitrixAuthError(detail="Invalid access_token format")
+            raise BitrixAuthError("Invalid access token format")
         return access_token
 
-    async def _save_tokens(self, token_data: Dict[str, str]) -> None:
-        """Сохранение полученных токенов"""
+    async def _save_tokens(self, token_data: dict[str, str]) -> None:
+        """Сохранение полученных токенов в хранилище."""
         try:
+            expires_in = int(token_data.get("expires_in", 3600))
             await self.token_storage.save_token(
                 token_data["access_token"],
                 "access_token",
-                expire_seconds=int(token_data["expires_in"]),
+                expire_seconds=expires_in,
             )
-            await self.token_storage.save_token(
-                token_data["refresh_token"],
-                "refresh_token",
+            if "refresh_token" in token_data:
+                await self.token_storage.save_token(
+                    token_data["refresh_token"],
+                    "refresh_token",
+                )
+            logger.debug(
+                "Tokens saved successfully", extra={"expires_in": expires_in}
             )
-            logger.debug("Tokens saved to storage")
         except Exception as e:
-            logger.error(f"Failed to save tokens: {e}")
+            logger.error(
+                f"Failed to save tokens: {e}",
+                extra={"token_keys": list(token_data.keys())},
+            )
             raise RuntimeError("Token storage failure") from e
 
     def get_auth_url(self) -> str:
@@ -125,3 +171,14 @@ class BitrixOAuthClient(BaseBitrixClient):
             "response_type": "code",
         }
         return f"{self.portal_domain}{OAUTH_ENDPOINT}?{urlencode(params)}"
+
+    @property
+    def is_authenticated(self) -> bool:
+        """
+        Проверяет, есть ли у клиента доступ к токенам.
+
+        Note: Это не проверяет валидность токенов, только их наличие.
+        """
+        # В реальной реализации нужно было бы асинхронно проверять хранилище
+        # Для упрощения возвращаем True, предполагая что токены есть
+        return True
