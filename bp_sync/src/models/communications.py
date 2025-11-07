@@ -10,12 +10,16 @@ from .bases import CommunicationType, EntityType, IntIdEntity
 
 
 class CommunicationChannelType(Base):
+    """Типы коммуникационных каналов."""
+
     __tablename__ = "communication_channel_types"
+
     __table_args__ = (
         UniqueConstraint(
             "type_id", "value_type", name="uq_channel_type_value_type"
         ),
     )
+
     type_id: Mapped[CommunicationType] = mapped_column(
         String(20),
         comment="Тип коммуникации",
@@ -28,27 +32,28 @@ class CommunicationChannelType(Base):
         String(255),
         default=None,
         nullable=True,
+        comment="Описание типа канала",
     )
     channels: Mapped[list["CommunicationChannel"]] = relationship(
-        "CommunicationChannel", back_populates="channel_type"
+        "CommunicationChannel",
+        back_populates="channel_type",
+        cascade="all, delete-orphan",
     )
+
+    def __str__(self) -> str:
+        return f"{self.type_id} - {self.value_type}"
 
 
 class CommunicationChannel(IntIdEntity):
+    """Коммуникационные каналы сущностей."""
+
     __tablename__ = "communication_channels"
+
     # __table_args__ = (
     #    UniqueConstraint(
     #        "channel_type_id", "value", name="uq_channel_type_value"
     #    ),
     # )
-
-    def __str__(self) -> str:
-        name = ""
-        if self.type_id:
-            name += self.type_id
-        if self.value_type:
-            name += f" {self.value_type}"
-        return f"{name}: {self.value}" if name else str(self.value)
 
     entity_type: Mapped[EntityType] = mapped_column(
         String(20),
@@ -59,14 +64,24 @@ class CommunicationChannel(IntIdEntity):
         comment="Внешний ID соответствующей сущности"
     )  # Внешний ID соответствующей сущности
     channel_type_id: Mapped[UUID] = mapped_column(
-        ForeignKey("communication_channel_types.id")
+        ForeignKey("communication_channel_types.id", ondelete="CASCADE")
     )
     channel_type: Mapped["CommunicationChannelType"] = relationship(
-        "CommunicationChannelType", back_populates="channels"
+        "CommunicationChannelType",
+        back_populates="channels",
+        lazy="joined",  # Жадная загрузка для производительности
     )
     value: Mapped[str] = mapped_column(
         String(255), comment="Значение коннекта"
     )  # VALUE : Значение коннекта
+
+    def __str__(self) -> str:
+        name = ""
+        if self.type_id:
+            name += self.type_id
+        if self.value_type:
+            name += f" {self.value_type}"
+        return f"{name}: {self.value}" if name else str(self.value)
 
     @hybrid_property  # type: ignore[misc]
     def type_id(self) -> str | None:

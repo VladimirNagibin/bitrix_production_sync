@@ -24,6 +24,7 @@ class Settings(BaseSettings):  # type: ignore
     ALGORITHM: str = "HS256"
     USER_ADMIN: str = "admin"
     PASS_ADMIN: str = "pass"
+    TOKEN_EXPIRY_MINUTES: int = 60
 
     BITRIX_LOGIN: str = ""
     BITRIX_PASS: str = ""

@@ -15,12 +15,14 @@ TOKEN_ERRORS = {"expired_token", "invalid_token"}
 
 
 class BitrixAPIClient(BaseBitrixClient):
+    """Клиент для работы с Bitrix24 REST API."""
+
     def __init__(
         self,
         oauth_client: BitrixOAuthClient,
         api_base_url: str = "",
         max_retries: int = MAX_RETRIES,
-        timeout: int = DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
     ):
         super().__init__(timeout)
         self.oauth_client = oauth_client
@@ -33,13 +35,21 @@ class BitrixAPIClient(BaseBitrixClient):
         self, method: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """
-        Отправка API запроса к Bitrix24
+        Вызывает метод Bitrix24 API.
 
         Args:
             method: API метод (например 'crm.deal.list')
             params: Параметры запроса
+
+        Returns:
+            Ответ API
+
+        Raises:
+            BitrixAuthError: Ошибки аутентификации
+            BitrixApiError: Ошибки API
         """
         attempt = 0
+
         while attempt <= self.max_retries:
             attempt += 1
             try:
@@ -48,40 +58,81 @@ class BitrixAPIClient(BaseBitrixClient):
                 payload = {"auth": access_token}
                 if params:
                     payload.update(params)
+
                 response = await self._post(url, payload)
+
                 if "error" in response:
                     self._handle_api_error(response, attempt)
+
                 if response.get("result") is not None:
                     return response
-                logger.error(f"Response has no result. {method}: {params}")
+                logger.error(
+                    "API response has no result",
+                    extra={"method": method, "attempt": attempt},
+                )
                 raise BitrixApiError(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    error_description="Response has no result.",
+                    error="missing_result",
+                    error_description="API response has no result",
                 )
             except BitrixAuthError as e:
-                logger.error(f"Authentication error: {str(e)}")
+                logger.warning(
+                    f"Authentication error on attempt {attempt}: {e}",
+                    extra={"method": method, "attempt": attempt},
+                )
                 if attempt > self.max_retries:
+                    logger.error(
+                        "Max authentication retries exceeded",
+                        extra={
+                            "method": method,
+                            "max_retries": self.max_retries,
+                        },
+                    )
                     raise
                 continue
-        logger.error(f"Token refresh failed after retries. {method}: {params}")
+        logger.error(
+            "Unexpected exit from API call loop",
+            extra={"method": method, "attempt": attempt},
+        )
         raise BitrixAuthError("Token refresh failed after retries")
 
     def _handle_api_error(
         self, response: dict[str, Any], attempt: int
     ) -> None:
-        """Обработка ошибок в ответе API"""
+        """
+        Обрабатывает ошибки API.
+
+        Args:
+            response: Ответ API с ошибкой
+            attempt: Номер текущей попытки
+
+        Raises:
+            BitrixAuthError: Для ошибок токена
+            BitrixApiError: Для других ошибок API
+        """
         error_code = response.get("error", "unknown_error")
         error_desc = response.get(
             "error_description", "Unknown Bitrix API error"
         )
         if error_code in TOKEN_ERRORS and attempt <= self.max_retries:
             logger.warning(
-                "Token error detected, retrying "
-                f"(attempt {attempt}/{self.max_retries})"
+                (
+                    f"Token error detected, retrying "
+                    f"(attempt {attempt}/{self.max_retries})"
+                ),
+                extra={"error_code": error_code},
             )
             self._invalidate_current_token()
-            raise BitrixAuthError("Token invalid or expired")
-        logger.error(f"Bitrix API error [{error_code}]: {error_desc}")
+            raise BitrixAuthError(f"Token invalid or expired: {error_code}")
+
+        logger.error(
+            f"Bitrix API error: {error_code} - {error_desc}",
+            extra={
+                "error_code": error_code,
+                "error_description": error_desc,
+                "status_code": response.get("status_code"),
+            },
+        )
         raise BitrixApiError(
             status_code=response.get(
                 "status_code", status.HTTP_400_BAD_REQUEST
@@ -98,5 +149,6 @@ class BitrixAPIClient(BaseBitrixClient):
             asyncio.create_task(
                 self.oauth_client.token_storage.delete_token("access_token")
             )
+            logger.debug("Access token invalidation scheduled")
         except Exception as e:
             logger.warning(f"Failed to invalidate token: {e}")

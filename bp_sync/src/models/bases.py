@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, ClassVar, Type, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Type, TypeVar
 
 from sqlalchemy import DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declared_attr
@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 
 class EntityType(StrEnum):
+    """Типы сущностей в системе."""
+
     CONTACT = "Contact"
     COMPANY = "Company"
     LEAD = "Lead"
@@ -29,6 +31,8 @@ class EntityType(StrEnum):
 
 
 class CommunicationType(StrEnum):
+    """Типы коммуникационных каналов."""
+
     PHONE = auto()
     EMAIL = auto()
     WEB = auto()
@@ -37,6 +41,7 @@ class CommunicationType(StrEnum):
 
     @staticmethod
     def has_value(value: str) -> bool:
+        """Проверяет, существует ли значение в перечислении."""
         return value in CommunicationType.__members__
 
 
@@ -54,9 +59,11 @@ T = TypeVar("T", bound=CommonFieldMixin)
 class IntIdEntity(Base):
     """Базовый класс для сущностей с внешними ID"""
 
+    __abstract__ = True
+
+    # Аннотация для схемы класса
     _schema_class: ClassVar[Type[CommonFieldMixin] | None] = None
 
-    __abstract__ = True
     external_id: Mapped[int] = mapped_column(
         unique=True,
         comment="ID во внешней системе",
@@ -69,20 +76,21 @@ class IntIdEntity(Base):
             return cls._schema_class
 
         # Попытка автоматического определения имени схемы
-        model_name = cls.__name__
-        schema_name = f"{model_name}Create"
         try:
-            # Импортируем модуль схем (замените на ваш реальный импорт)
-            import schemas  # import schemas.deal_schemas
+            module_name = f"schemas.{cls.__module__.split('.')[-1]}_schemas"
+            import importlib
 
-            schema_class = getattr(schemas, schema_name, None)
+            schemas_module = importlib.import_module(module_name)
+
+            schema_name = f"{cls.__name__}Create"
+            schema_class = getattr(schemas_module, schema_name, None)
+
             if schema_class and issubclass(schema_class, CommonFieldMixin):
-                assert isinstance(schema_class, type)
                 cls._schema_class = schema_class
-                return schema_class
-        except (ImportError, AttributeError):
-            pass
+                return schema_class  # type: ignore[no-any-return]
 
+        except (ImportError, AttributeError, TypeError):
+            pass
         return None
 
     def to_pydantic(
@@ -99,16 +107,18 @@ class IntIdEntity(Base):
 
         Returns:
             Экземпляр Pydantic схемы
+
+        Raises:
+            ValueError: Если не удалось определить класс схемы
         """
+        schema_class = schema_class or self._get_schema_class()
         if schema_class is None:
-            schema_class = self._get_schema_class()
-            if schema_class is None:
-                raise ValueError(
-                    "Cannot automatically determine schema class for "
-                    f"{self.__class__.__name__}. Please provide schema_class "
-                    "parameter or set _schema_class."
-                )
-        data = {}
+            raise ValueError(
+                "Cannot automatically determine schema class for "
+                f"{self.__class__.__name__}. Please provide schema_class "
+                "parameter or set _schema_class."
+            )
+        data: dict[str, Any] = {}
 
         # Получаем все поля схемы
         for field_name in schema_class.model_fields:
@@ -120,15 +130,16 @@ class IntIdEntity(Base):
 
             if hasattr(self, field_name):
                 value = getattr(self, field_name)
-
-                # Особые обработки для определенных полей
-                if field_name == "external_id" and value:
-                    data["ID"] = value
-                else:
-                    data[field_name] = value
+                data.update(self._transform_field_value(field_name, value))
         if hasattr(self, "id"):
             data["internal_id"] = self.id
         return schema_class(**data)
+
+    def _transform_field_value(self, field_name: str, value: Any) -> Any:
+        """Трансформирует значение поля при необходимости."""
+        if field_name == "external_id" and value:
+            return {"ID": value}
+        return {field_name: value}
 
     def _is_relationship_field(self, field_name: str) -> bool:
         """Проверяет, является ли поле связью"""
@@ -143,24 +154,31 @@ class NameIntIdEntity(IntIdEntity):
     """Базовый класс для сущностей с внешними ID и name"""
 
     __abstract__ = True
-    name: Mapped[str]
+
+    name: Mapped[str] = mapped_column(comment="Название")
+
+    def __str__(self) -> str:
+        return str(self.name)
 
 
 class NameStrIdEntity(Base):
     """Базовый класс для сущностей со строчным внешними ID и name"""
 
     __abstract__ = True
+
     external_id: Mapped[str] = mapped_column(
         unique=True,
         comment="ID во внешней системе",
     )
-    name: Mapped[str]
+    name: Mapped[str] = mapped_column(comment="Название")
 
     def __str__(self) -> str:
         return str(self.name)
 
 
 class TimestampsMixin:
+    """Миксин для временных меток."""
+
     date_create: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), comment="Дата создания"
     )  # DATE_CREATE : Дата создания  (2025-06-18T03:00:00+03:00)
@@ -177,15 +195,6 @@ class TimestampsMixin:
 
 class UserRelationsMixin:
     """Миксин для отношений с пользователями"""
-
-    # @property
-    # def tablename1(cls) -> str:
-    #    return "companies"
-
-    # @property
-    # def entity_type1(cls) -> str:
-    # return "Company"
-    #    raise NotImplementedError("Должно быть реализовано в дочернем классе")
 
     assigned_by_id: Mapped[int] = mapped_column(
         ForeignKey("users.external_id"),
@@ -204,16 +213,14 @@ class UserRelationsMixin:
         comment="ID последней активности",
     )
 
-    # @property
-    # def tablename(self) -> str:
-    #    raise NotImplementedError("Должно быть реализовано в дочернем классе")
-
     @property
     def entity_type(self) -> EntityType:
+        """Должен быть переопределен в дочерних классах."""
         raise NotImplementedError("Должно быть реализовано в дочернем классе")
 
     @declared_attr  # type: ignore[misc]
     def assigned_user(cls) -> Mapped["User"]:
+        """Отношение с ответственным пользователем."""
         return relationship(
             "User",
             foreign_keys=[cls.assigned_by_id],
@@ -224,6 +231,7 @@ class UserRelationsMixin:
 
     @declared_attr  # type: ignore[misc]
     def created_user(cls) -> Mapped["User"]:
+        """Отношение с создавшим пользователем."""
         return relationship(
             "User",
             foreign_keys=[cls.created_by_id],
@@ -234,6 +242,7 @@ class UserRelationsMixin:
 
     @declared_attr  # type: ignore[misc]
     def modify_user(cls) -> Mapped["User"]:
+        """Отношение с изменившим пользователем."""
         return relationship(
             "User",
             foreign_keys=[cls.modify_by_id],
@@ -244,6 +253,7 @@ class UserRelationsMixin:
 
     @declared_attr  # type: ignore[misc]
     def last_activity_user(cls) -> Mapped["User"]:
+        """Отношение с пользователем последней активности."""
         tablename = cls.__tablename__  # type: ignore[attr-defined]
         return relationship(
             "User",
@@ -320,6 +330,7 @@ class CommunicationMixin:
 
     @declared_attr  # type: ignore[misc]
     def communications(cls) -> Mapped[list["CommunicationChannel"]]:
+        """Отношение с коммуникационными каналами."""
         condition = (
             "and_("
             "foreign(CommunicationChannel.entity_type) == '{}',"
@@ -339,46 +350,36 @@ class CommunicationMixin:
     @property
     def phones(self) -> list[str]:
         """Список телефонных номеров"""
-        return [
-            c.value
-            for c in self.communications
-            if c.channel_type.type_id == CommunicationType.PHONE
-        ]
+        return self._get_communication_values(CommunicationType.PHONE)
 
     @property
     def emails(self) -> list[str]:
         """Список email-адресов"""
-        return [
-            c.value
-            for c in self.communications
-            if c.channel_type.type_id == CommunicationType.EMAIL
-        ]
+        return self._get_communication_values(CommunicationType.EMAIL)
 
     @property
     def webs(self) -> list[str]:
         """Список сайтов"""
-        return [
-            c.value
-            for c in self.communications
-            if c.channel_type.type_id == CommunicationType.WEB
-        ]
+        return self._get_communication_values(CommunicationType.WEB)
 
     @property
     def ims(self) -> list[str]:
         """Список мессенджеров"""
-        return [
-            c.value
-            for c in self.communications
-            if c.channel_type.type_id == CommunicationType.IM
-        ]
+        return self._get_communication_values(CommunicationType.IM)
 
     @property
     def links(self) -> list[str]:
         """Список ссылок"""
+        return self._get_communication_values(CommunicationType.LINK)
+
+    def _get_communication_values(
+        self, comm_type: CommunicationType
+    ) -> list[str]:
+        """Вспомогательный метод для получения значений коммуникаций."""
         return [
-            c.value
-            for c in self.communications
-            if c.channel_type.type_id == CommunicationType.LINK
+            channel.value
+            for channel in self.communications
+            if channel.channel_type.type_id == comm_type
         ]
 
 
@@ -439,6 +440,8 @@ class BusinessEntityCore(
     MarketingMixin,
     SocialProfilesMixin,
 ):
+    """Базовый класс для бизнес-сущностей."""
+
     __abstract__ = True
 
     comments: Mapped[str | None] = mapped_column(
@@ -458,10 +461,9 @@ class BusinessEntityCore(
     )  # OPENED : Доступен для всех (Y/N)
 
 
-class BusinessEntity(
-    BusinessEntityCore,
-    MarketingMixinUTM,
-):
+class BusinessEntity(BusinessEntityCore, MarketingMixinUTM):
+    """Расширенный класс бизнес-сущностей с UTM метками."""
+
     __abstract__ = True
 
     originator_id: Mapped[str | None] = mapped_column(
