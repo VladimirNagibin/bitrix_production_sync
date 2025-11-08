@@ -1,9 +1,12 @@
 from urllib.parse import urlencode
 
+from fastapi import Depends
+
 from core.logger import logger
+from core.settings import settings
 
 from ..exceptions import BitrixAuthError
-from ..token_services.token_storage import TokenStorage
+from ..token_services.token_storage import TokenStorage, get_token_storage
 from .base_bitrix_client import DEFAULT_TIMEOUT, BaseBitrixClient
 
 OAUTH_ENDPOINT = "/oauth/authorize/"
@@ -182,3 +185,21 @@ class BitrixOAuthClient(BaseBitrixClient):
         # В реальной реализации нужно было бы асинхронно проверять хранилище
         # Для упрощения возвращаем True, предполагая что токены есть
         return True
+
+
+def get_oauth_client(
+    token_storade: TokenStorage = Depends(get_token_storage),
+) -> BitrixOAuthClient:
+    """
+    Фабрика для внедрения зависимостей BitrixOAuthClient.
+
+    Returns:
+        Экземпляр BitrixOAuthClient
+    """
+    return BitrixOAuthClient(
+        portal_domain=settings.BITRIX_PORTAL,
+        client_id=settings.BITRIX_CLIENT_ID,
+        client_secret=settings.BITRIX_CLIENT_SECRET,
+        redirect_uri=settings.BITRIX_REDIRECT_URI,
+        token_storage=token_storade,
+    )
